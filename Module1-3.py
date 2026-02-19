@@ -1,0 +1,457 @@
+import sys, cv2, mediapipe as mp, numpy as np, time
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
+    QFrame, QPushButton, QSizePolicy
+)
+from PyQt5.QtGui import QFont, QImage, QPixmap
+from PyQt5.QtCore import Qt, QTimer
+import easyocr
+
+
+# ================= Canvas Config =================
+CANVAS_W, CANVAS_H = 1280, 720
+canvas = np.ones((CANVAS_H, CANVAS_W, 3), dtype=np.uint8) * 255
+
+pen_color = (0, 0, 0)
+pen_thickness = 5
+eraser_thickness = 60
+eraser_mode = False
+gesture_enabled = True
+
+prev_x, prev_y = 0, 0
+alpha = 0.35
+last_draw_point = None
+
+# ===== NEW: Typing Feature =====
+typing_mode = False
+typed_text = ""
+text_position = (100, 100)
+
+
+# ================= Mediapipe =================
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.6
+)
+
+cap = cv2.VideoCapture(0)
+
+
+def fingers_up(hand_landmarks):
+    tips_ids = [4, 8, 12, 16, 20]
+    up = []
+    for tip in tips_ids:
+        tip_y = hand_landmarks.landmark[tip].y
+        pip_y = hand_landmarks.landmark[tip - 2].y
+        up.append(tip_y < pip_y)
+    return up
+
+
+def get_gesture(up):
+    if all(up):
+        return "erase"
+    elif up[1] and up[2] and not up[3] and not up[4]:
+        return "draw"
+    elif up[1] and not up[2] and not up[3] and not up[4]:
+        return "move"
+    return None
+
+
+# ================= Main App =================
+class SmartBoardApp(QWidget):
+
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("Clarion - Smart Blackboard")
+        self.setGeometry(100, 100, 1200, 700)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        self.ocr_reader = easyocr.Reader(['en'], gpu=False)
+
+        main_layout = QHBoxLayout()
+        right_layout = QVBoxLayout()
+
+        # -------- Board --------
+        self.board = QLabel()
+        self.board.setFrameStyle(QFrame.Box)
+        self.board.setAlignment(Qt.AlignCenter)
+        self.board.setStyleSheet(
+            "background-color: white; border: 2px solid black;"
+        )
+        self.board.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        self.board.setMinimumSize(800, 450)
+
+        # -------- Camera --------
+        self.camera = QLabel()
+        self.camera.setFrameStyle(QFrame.Box)
+        self.camera.setFixedHeight(300)
+
+        # -------- Output --------
+        self.output = QLabel("AI OUTPUT")
+        self.output.setAlignment(Qt.AlignTop)
+        self.output.setFrameStyle(QFrame.Box)
+        self.output.setFont(QFont("Arial", 11))
+        self.output.setFixedHeight(170)
+
+        # -------- Buttons --------
+        self.btn_clear = QPushButton("Clear")
+        self.btn_save = QPushButton("Save")
+        self.btn_gesture = QPushButton("Toggle Gesture")
+        self.btn_eraser = QPushButton("Toggle Eraser")
+        self.btn_analyze = QPushButton("Analyze Board")
+
+        self.btn_clear.clicked.connect(self.clear_canvas)
+        self.btn_save.clicked.connect(self.save_canvas)
+        self.btn_gesture.clicked.connect(self.toggle_gesture)
+        self.btn_eraser.clicked.connect(self.toggle_eraser)
+        self.btn_analyze.clicked.connect(self.analyze_board)
+
+        controls = QHBoxLayout()
+        for b in [self.btn_clear, self.btn_save,
+                  self.btn_gesture, self.btn_eraser,
+                  self.btn_analyze]:
+            controls.addWidget(b)
+
+        self.status = QLabel("Status: Ready")
+        self.status.setStyleSheet(
+            "padding:5px; background:#efefef;"
+        )
+
+        right_layout.addWidget(self.camera)
+        right_layout.addWidget(self.output)
+        right_layout.addLayout(controls)
+        right_layout.addWidget(self.status)
+        right_layout.addStretch()
+
+        main_layout.addWidget(self.board, 3)
+        main_layout.addLayout(right_layout, 1)
+
+        self.setLayout(main_layout)
+
+        # -------- Timer --------
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_frames)
+        self.timer.start(20)
+
+        # Mouse
+        self.mouse_pressed = False
+        self.last_mouse_point = None
+
+    # ================= KEYBOARD =================
+    def keyPressEvent(self, event):
+        global gesture_enabled, eraser_mode
+        global typing_mode, typed_text, text_position
+
+        # Toggle typing mode
+        if event.key() == Qt.Key_Q:
+            typing_mode = not typing_mode
+            self.status.setText(
+                f"Typing Mode {'ON' if typing_mode else 'OFF'}"
+            )
+            return
+
+        if typing_mode:
+            if event.key() == Qt.Key_Backspace:
+                typed_text = typed_text[:-1]
+
+            elif event.key() == Qt.Key_Return:
+                cv2.putText(
+                    canvas,
+                    typed_text,
+                    text_position,
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 0, 0),
+                    2
+                )
+                typed_text = ""
+
+            else:
+                typed_text += event.text()
+
+            return
+
+        # Existing shortcuts
+        if event.key() == Qt.Key_C:
+            self.clear_canvas()
+
+        elif event.key() == Qt.Key_S:
+            self.save_canvas()
+
+        elif event.key() == Qt.Key_G:
+            gesture_enabled = not gesture_enabled
+
+        elif event.key() == Qt.Key_E:
+            eraser_mode = not eraser_mode
+
+    # ================= MOUSE =================
+    def mousePressEvent(self, event):
+        global text_position
+
+        if event.button() in (Qt.LeftButton, Qt.RightButton):
+            if self.board.geometry().contains(event.pos()):
+                self.mouse_pressed = True
+                self.last_mouse_point = self.map_to_canvas(event.pos())
+                text_position = self.last_mouse_point
+
+    def mouseMoveEvent(self, event):
+        global canvas
+
+        if not self.mouse_pressed:
+            return
+
+        if self.board.geometry().contains(event.pos()):
+            current = self.map_to_canvas(event.pos())
+            prev = self.last_mouse_point
+
+            if prev:
+                color = (255, 255, 255) if eraser_mode else pen_color
+                thickness = eraser_thickness if eraser_mode else pen_thickness
+                cv2.line(canvas, prev, current, color, thickness)
+
+            self.last_mouse_point = current
+
+    def mouseReleaseEvent(self, event):
+        self.mouse_pressed = False
+        self.last_mouse_point = None
+
+    def map_to_canvas(self, pos):
+        local = self.board.mapFromParent(pos)
+        bx, by = local.x(), local.y()
+        bw, bh = self.board.width(), self.board.height()
+        cx = int(bx * CANVAS_W / bw)
+        cy = int(by * CANVAS_H / bh)
+        return (cx, cy)
+
+    # ================= UPDATE =================
+    def update_frames(self):
+        global canvas, prev_x, prev_y
+        global last_draw_point, eraser_mode
+        global typing_mode, typed_text, text_position
+
+        ret, frame = cap.read()
+        if not ret:
+            return
+
+        frame = cv2.flip(frame, 1)
+        cam_h, cam_w = frame.shape[:2]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        result = hands.process(rgb)
+
+        draw_point = None
+
+        if gesture_enabled and result.multi_hand_landmarks:
+            for hand_landmarks in result.multi_hand_landmarks:
+
+                index_tip = hand_landmarks.landmark[8]
+                x_px = int(index_tip.x * cam_w)
+                y_px = int(index_tip.y * cam_h)
+
+                cx = (1 - alpha) * prev_x + alpha * x_px
+                cy = (1 - alpha) * prev_y + alpha * y_px
+                prev_x, prev_y = cx, cy
+
+                up = fingers_up(hand_landmarks)
+                gesture = get_gesture(up)
+
+                canvas_x = int(np.interp(cx, [0, cam_w], [0, CANVAS_W]))
+                canvas_y = int(np.interp(cy, [0, cam_h], [0, CANVAS_H]))
+                pointer = (canvas_x, canvas_y)
+
+                if gesture == "draw":
+                    eraser_mode = False
+                    draw_point = pointer
+
+                elif gesture == "erase":
+                    eraser_mode = True
+                    draw_point = pointer
+
+        if draw_point:
+            if last_draw_point is None:
+                last_draw_point = draw_point
+
+            color = (255, 255, 255) if eraser_mode else pen_color
+            thickness = eraser_thickness if eraser_mode else pen_thickness
+
+            cv2.line(canvas, last_draw_point,
+                     draw_point, color, thickness)
+
+            last_draw_point = draw_point
+        else:
+            last_draw_point = None
+
+        overlay = canvas.copy()
+
+        # ================= POINTER MARKER =================
+        if draw_point:
+            marker_color = (0, 0, 255) if eraser_mode else (255, 0, 0)
+            cv2.circle(overlay, draw_point, 10, marker_color, -1)
+
+        # ================= TYPING PREVIEW =================
+        if typing_mode and typed_text:
+            cv2.putText(
+                overlay,
+                typed_text,
+                text_position,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 0),
+                2
+            )
+
+        # ================= STATUS TEXT OVERLAY =================
+        cv2.putText(
+            overlay,
+            f"Gesture: {'ON' if gesture_enabled else 'OFF'}",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (80, 80, 80),
+            2
+        )
+
+        cv2.putText(
+            overlay,
+            f"Eraser: {'ON' if eraser_mode else 'OFF'}",
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (80, 80, 80),
+            2
+        )
+
+        if typing_mode:
+            cv2.putText(
+                overlay,
+                "Typing Mode: ON",
+                (10, 90),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2
+            )
+
+        rgb_board = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+
+        qimg = QImage(
+            rgb_board.data,
+            rgb_board.shape[1],
+            rgb_board.shape[0],
+            QImage.Format_RGB888
+        )
+
+        pixmap = QPixmap.fromImage(qimg)
+        scaled = pixmap.scaled(
+            self.board.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+
+        self.board.setPixmap(scaled)
+
+        qimg_cam = QImage(
+            rgb.data,
+            rgb.shape[1],
+            rgb.shape[0],
+            QImage.Format_RGB888
+        )
+
+        self.camera.setPixmap(QPixmap.fromImage(qimg_cam))
+
+    # ================= CONTROLS =================
+    def clear_canvas(self):
+        global canvas
+        canvas[:] = 255
+
+    def save_canvas(self):
+        filename = f"clarion_{int(time.time())}.png"
+        cv2.imwrite(filename, canvas)
+        self.status.setText(f"Saved {filename}")
+
+    def toggle_gesture(self):
+        global gesture_enabled
+        gesture_enabled = not gesture_enabled
+
+    def toggle_eraser(self):
+        global eraser_mode
+        eraser_mode = not eraser_mode
+
+    def analyze_board(self):
+        self.status.setText("Analyzing board...")
+
+        texts = self.extract_text(canvas)
+        shapes = self.detect_shapes(canvas)
+
+        result = ""
+
+        if texts:
+            result += "Extracted Text:\n"
+            for t in texts:
+                result += f"• {t}\n"
+
+        if shapes:
+            result += "\nDetected Shapes:\n"
+            for s in shapes:
+                result += f"• {s}\n"
+
+        if not texts and not shapes:
+            result = "Nothing detected."
+
+        self.output.setText(result)
+        self.status.setText("Analysis complete.")
+    
+    def detect_shapes(self, image):
+        detected = []
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, thresh = cv2.threshold(blur, 150, 255, cv2.THRESH_BINARY_INV)
+
+        contours, _ = cv2.findContours(
+            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 3000:
+                continue
+
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
+
+            sides = len(approx)
+
+            if sides == 3:
+                detected.append("Triangle")
+            elif sides == 4:
+                detected.append("Rectangle")
+            elif sides > 6:
+                detected.append("Circle")
+
+        return list(set(detected))
+
+
+    def extract_text(self, image):
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+        thresh = cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            11, 2
+        )
+
+        results = self.ocr_reader.readtext(thresh, detail=0)
+        return [t.strip() for t in results if t.strip() != ""]
+
+# ================= RUN =================
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    win = SmartBoardApp()
+    win.show()
+    sys.exit(app.exec_())
