@@ -105,7 +105,8 @@ class SmartBoardApp(QWidget):
         self.output = QTextEdit()
         self.output.setReadOnly(True)
         self.output.setFont(QFont("Arial", 11))
-        self.output.setFixedHeight(170)
+        self.output.setMinimumHeight(250)
+        self.output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.output.setStyleSheet("""
             QTextEdit {
                 background-color: #f8f8f8;
@@ -414,22 +415,29 @@ class SmartBoardApp(QWidget):
 
     def analyze_board(self):
         self.status.setText("Analyzing board with AI...")
+
         texts = self.extract_text(canvas)
         shapes = self.detect_shapes(cv2.resize(canvas, (640, 360)))
 
         structured_prompt = "You are an AI smart classroom assistant.\n\n"
 
+        # ✅ Include committed OCR text
         if texts:
             structured_prompt += "The following text was written on the board:\n"
             for t in texts:
                 structured_prompt += f"- {t}\n"
+
+        # ✅ NEW: Include currently typed text even if not committed
+        if typed_text.strip():
+            structured_prompt += "\nThe user is currently typing:\n"
+            structured_prompt += f"- {typed_text.strip()}\n"
 
         if shapes:
             structured_prompt += "\nThe following shapes were detected:\n"
             for s in shapes:
                 structured_prompt += f"- {s}\n"
 
-        if not texts and not shapes:
+        if not texts and not shapes and not typed_text.strip():
             self.output.setText("Nothing detected.")
             return
 
