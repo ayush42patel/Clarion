@@ -10,6 +10,8 @@ from PyQt5.QtCore import Qt, QTimer
 from groq import Groq
 import easyocr
 import os
+import datetime
+import json
 
 load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
@@ -417,7 +419,7 @@ class SmartBoardApp(QWidget):
         self.status.setText("Analyzing board with AI...")
 
         texts = self.extract_text(canvas)
-        shapes = self.detect_shapes(cv2.resize(canvas, (640, 360)))
+        shapes = self.detect_shapes(canvas)
 
         structured_prompt = "You are an AI smart classroom assistant.\n\n"
 
@@ -446,41 +448,58 @@ class SmartBoardApp(QWidget):
         ai_response = self.ask_ai(structured_prompt)
 
         self.output.setPlainText(ai_response)
+        self.save_session(ai_response)
         self.status.setText("AI Analysis Complete")
     
     def detect_shapes(self, image):
+
         detected = []
-
+    
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        _, thresh = cv2.threshold(blur, 150, 255, cv2.THRESH_BINARY_INV)
-
-        contours, _ = cv2.findContours(
-            thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-
+    
+        blur = cv2.GaussianBlur(gray, (5,5), 0)
+    
+        # Strong threshold for whiteboard
+        _, thresh = cv2.threshold(blur, 180, 255, cv2.THRESH_BINARY_INV)
+    
+        # Fill gaps in hand drawn lines
+        kernel = np.ones((5,5), np.uint8)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    
+        # Edge detection
+        edges = cv2.Canny(thresh, 50, 150)
+    
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
         for cnt in contours:
+        
             area = cv2.contourArea(cnt)
-            if area < 3000:
+    
+            if area < 1500:
                 continue
-
+            
             peri = cv2.arcLength(cnt, True)
+    
             approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-
+    
             sides = len(approx)
-
+    
             if sides == 3:
                 detected.append("Triangle")
+    
             elif sides == 4:
                 x, y, w, h = cv2.boundingRect(approx)
                 aspect_ratio = w / float(h)
-
+    
                 if 0.9 <= aspect_ratio <= 1.1:
                     detected.append("Square")
                 else:
                     detected.append("Rectangle")
-
-                    return list(set(detected))
+    
+            elif sides > 6:
+                detected.append("Circle")
+    
+        return list(set(detected))
 
 
     def extract_text(self, image):
@@ -538,6 +557,34 @@ class SmartBoardApp(QWidget):
 
         except Exception as e:
             return f"AI Error: {str(e)}"
+        
+    def save_session(self, ai_output):
+    
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_folder = os.path.join("sessions", f"session_{timestamp}")
+        os.makedirs(session_folder, exist_ok=True)
+
+        # Save board image
+        board_path = os.path.join(session_folder, "board.png")
+        cv2.imwrite(board_path, canvas)
+
+        # Save AI explanation
+        explanation_path = os.path.join(session_folder, "explanation.txt")
+        with open(explanation_path, "w", encoding="utf-8") as f:
+            f.write(ai_output)
+
+        # Save metadata
+        metadata = {
+            "timestamp": timestamp,
+            "board_image": board_path,
+            "ai_explanation": explanation_path
+        }
+
+        metadata_path = os.path.join(session_folder, "session.json")
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=4)
+
+        self.status.setText(f"Session saved: {timestamp}")
 
 # ================= RUN =================
 if __name__ == "__main__":
