@@ -6,7 +6,11 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QFont, QImage, QPixmap
 from PyQt5.QtWidgets import QTextEdit
+from PyQt5.QtWidgets import QListWidget
 from PyQt5.QtCore import Qt, QTimer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import Image
 from groq import Groq
 import easyocr
 import os
@@ -70,6 +74,12 @@ def get_gesture(up):
         return "move"
     return None
 
+def draw_badge(img, text, x, y, color):
+    cv2.rectangle(img, (x, y), (x + 180, y + 35), color, -1)
+    cv2.putText(img, text, (x + 10, y + 23),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (255, 255, 255), 2)
+
 
 # ================= Main App =================
 class SmartBoardApp(QWidget):
@@ -77,89 +87,171 @@ class SmartBoardApp(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Clarion - Smart Blackboard")
-        self.setGeometry(100, 100, 1200, 700)
+        self.setWindowTitle("Clarion AI Smart Blackboard")
+        self.setGeometry(100, 50, 1500, 900)
         self.setFocusPolicy(Qt.StrongFocus)
+
+        # -------- GLOBAL STYLE --------
+        self.setStyleSheet("""
+        QWidget {
+            background-color: #f4f6f8;
+            font-family: Segoe UI;
+        }
+
+        QPushButton {
+            border-radius: 8px;
+            padding: 8px;
+            font-weight: bold;
+            color: white;
+        }
+
+        QTextEdit {
+            border-radius: 12px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            background: white;
+        }
+        """)
 
         self.ocr_reader = easyocr.Reader(['en'], gpu=False)
 
         main_layout = QHBoxLayout()
-        right_layout = QVBoxLayout()
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(12)
 
-        # -------- Board --------
-        self.board = QLabel()
-        self.board.setFrameStyle(QFrame.Box)
-        self.board.setAlignment(Qt.AlignCenter)
-        self.board.setStyleSheet(
-            "background-color: white; border: 2px solid black;"
-        )
-        self.board.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Expanding
-        )
-        self.board.setMinimumSize(800, 450)
+        content_layout = QVBoxLayout()
 
-        # -------- Camera --------
-        self.camera = QLabel()
-        self.camera.setFrameStyle(QFrame.Box)
-        self.camera.setFixedHeight(300)
+        # ================= SIDEBAR =================
+        self.sidebar = QListWidget()
+        self.sidebar.setFixedWidth(250)
 
-        # -------- Output --------
-        self.output = QTextEdit()
-        self.output.setReadOnly(True)
-        self.output.setFont(QFont("Arial", 11))
-        self.output.setMinimumHeight(250)
-        self.output.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.output.setStyleSheet("""
-            QTextEdit {
-                background-color: #f8f8f8;
-                border: 1px solid #ccc;
-                padding: 8px;
-            }
+        self.sidebar.setStyleSheet("""
+        QListWidget {
+            background-color: #1e1e1e;
+            color: white;
+            border: none;
+            padding: 10px;
+        }
+        QListWidget::item {
+            padding: 10px;
+            border-radius: 6px;
+        }
+        QListWidget::item:selected {
+            background-color: #444;
+        }
         """)
 
-        # -------- Buttons --------
-        self.btn_clear = QPushButton("Clear")
-        self.btn_save = QPushButton("Save")
-        self.btn_gesture = QPushButton("Toggle Gesture")
-        self.btn_eraser = QPushButton("Toggle Eraser")
-        self.btn_analyze = QPushButton("Analyze Board")
+        self.sessions = []
+        self.sidebar.itemClicked.connect(self.load_session)
+        self.sidebar.addItem("➕ New Session")
 
+        # ================= BOARD =================
+        self.board = QLabel()
+        self.board.setAlignment(Qt.AlignCenter)
+        self.board.setStyleSheet("""
+            background-color: white;
+            border-radius: 12px;
+            border: 2px solid #ddd;
+        """)
+        self.board.setMinimumHeight(600)
+        self.board.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+
+        content_layout.addWidget(QLabel("🧠 Smart Board"))
+        content_layout.addWidget(self.board, 6)   # 🔥 MAIN AREA DOMINANT
+
+    # ================= LOWER PANEL =================
+        bottom_layout = QHBoxLayout()
+        # -------- CAMERA --------
+        cam_layout = QVBoxLayout()
+        cam_layout.addWidget(QLabel("📷 Camera"))
+
+        self.camera = QLabel()
+        self.camera.setFixedHeight(300)
+        self.camera.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.camera.setStyleSheet("""
+            border-radius: 10px;
+            border: 1px solid #ccc;
+        """)
+
+        cam_layout.addWidget(self.camera)
+
+        # -------- AI OUTPUT --------
+        ai_layout = QVBoxLayout()
+        ai_layout.addWidget(QLabel("🤖 AI Assistant"))
+
+        self.output = QTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setPlaceholderText("AI explanation will appear here...")
+
+        ai_layout.addWidget(self.output)
+
+        bottom_layout.addLayout(cam_layout, 1)
+        bottom_layout.addLayout(ai_layout, 2)
+
+        content_layout.addLayout(bottom_layout, 2)
+
+        # ================= BUTTONS =================
+        controls = QHBoxLayout()
+
+        self.btn_clear = QPushButton("Clear")
+        self.btn_clear.setStyleSheet("background:#ff4d4f;")
+
+        self.btn_save = QPushButton("Save")
+        self.btn_save.setStyleSheet("background:#52c41a;")
+
+        self.btn_gesture = QPushButton("Gesture")
+        self.btn_gesture.setStyleSheet("background:#2b2b2b;")
+
+        self.btn_eraser = QPushButton("Eraser")
+        self.btn_eraser.setStyleSheet("background:#2b2b2b;")
+
+        self.btn_analyze = QPushButton("Analyze")
+        self.btn_analyze.setStyleSheet("background:#722ed1;")
+
+        self.btn_export = QPushButton("Export Notes")
+        self.btn_export.setStyleSheet("background:#1890ff;")
+        controls.addWidget(self.btn_export)
+
+        self.btn_export.clicked.connect(self.export_notes)
+
+        for b in [self.btn_clear, self.btn_save,
+                self.btn_gesture, self.btn_eraser,
+                self.btn_analyze]:
+            b.setMinimumHeight(40)
+            controls.addWidget(b)
+
+        content_layout.addLayout(controls)
+
+        # ================= STATUS =================
+        self.status = QLabel("Ready")
+        self.status.setStyleSheet("""
+            background:#222;
+            color:white;
+            padding:8px;
+            border-radius:6px;
+        """)
+        content_layout.addWidget(self.status)
+
+        self.setLayout(main_layout)
+
+        # BUTTON CONNECTIONS
         self.btn_clear.clicked.connect(self.clear_canvas)
         self.btn_save.clicked.connect(self.save_canvas)
         self.btn_gesture.clicked.connect(self.toggle_gesture)
         self.btn_eraser.clicked.connect(self.toggle_eraser)
         self.btn_analyze.clicked.connect(self.analyze_board)
 
-        controls = QHBoxLayout()
-        for b in [self.btn_clear, self.btn_save,
-                  self.btn_gesture, self.btn_eraser,
-                  self.btn_analyze]:
-            controls.addWidget(b)
-
-        self.status = QLabel("Status: Ready")
-        self.status.setStyleSheet(
-            "padding:5px; background:#efefef;"
-        )
-
-        right_layout.addWidget(self.camera)
-        right_layout.addWidget(self.output)
-        right_layout.addLayout(controls)
-        right_layout.addWidget(self.status)
-        right_layout.addStretch()
-
-        main_layout.addWidget(self.board, 3)
-        main_layout.addLayout(right_layout, 1)
-
-        self.setLayout(main_layout)
-
-        # -------- Timer --------
+        # TIMER
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frames)
         self.timer.start(20)
 
-        # Mouse
         self.mouse_pressed = False
         self.last_mouse_point = None
+
+        main_layout.addWidget(self.sidebar)
+        main_layout.addLayout(content_layout)
 
     # ================= KEYBOARD =================
     def keyPressEvent(self, event):
@@ -247,12 +339,37 @@ class SmartBoardApp(QWidget):
         self.last_mouse_point = None
 
     def map_to_canvas(self, pos):
-        local = self.board.mapFromParent(pos)
-        bx, by = local.x(), local.y()
-        bw, bh = self.board.width(), self.board.height()
-        cx = int(bx * CANVAS_W / bw)
-        cy = int(by * CANVAS_H / bh)
+        label_pos = self.board.mapFromParent(pos)
+
+        pixmap = self.board.pixmap()
+        if pixmap is None:
+            return (0, 0)
+
+        label_w = self.board.width()
+        label_h = self.board.height()
+
+        pix_w = pixmap.width()
+        pix_h = pixmap.height()
+
+        # Calculate offset (because of KeepAspectRatio)
+        offset_x = (label_w - pix_w) // 2
+        offset_y = (label_h - pix_h) // 2
+
+        x = label_pos.x() - offset_x
+        y = label_pos.y() - offset_y
+
+        # Clamp inside pixmap
+        x = max(0, min(x, pix_w))
+        y = max(0, min(y, pix_h))
+
+        # Map to canvas resolution
+        cx = int(x * CANVAS_W / pix_w)
+        cy = int(y * CANVAS_H / pix_h)
+
         return (cx, cy)
+
+
+    
 
     # ================= UPDATE =================
     def update_frames(self):
@@ -338,36 +455,19 @@ class SmartBoardApp(QWidget):
             cv2.circle(overlay, (pointer_x, pointer_y), 8, (0, 120, 255), -1)
 
         # ================= STATUS TEXT OVERLAY =================
-        cv2.putText(
-            overlay,
-            f"Gesture: {'ON' if gesture_enabled else 'OFF'}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (80, 80, 80),
-            2
-        )
+        draw_badge(overlay,
+                    f"Gesture {'ON' if gesture_enabled else 'OFF'}",
+                    10, 10,
+                    (0, 170, 0) if gesture_enabled else (120,120,120))
 
-        cv2.putText(
-            overlay,
-            f"Eraser: {'ON' if eraser_mode else 'OFF'}",
-            (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (80, 80, 80),
-            2
-        )
+        draw_badge(overlay,
+                f"Eraser {'ON' if eraser_mode else 'OFF'}",
+                10, 55,
+                (180, 0, 0) if eraser_mode else (120,120,120))
 
         if typing_mode:
-            cv2.putText(
-                overlay,
-                "Typing Mode: ON",
-                (10, 90),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2
-            )
+            draw_badge(overlay, "Typing ON", 10, 100, (0, 0, 180))
+
 
         rgb_board = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
 
@@ -585,6 +685,70 @@ class SmartBoardApp(QWidget):
             json.dump(metadata, f, indent=4)
 
         self.status.setText(f"Session saved: {timestamp}")
+        session_name = f"Session {datetime.datetime.now().strftime('%H:%M:%S')}"
+
+        self.sidebar.insertItem(1, session_name)
+
+        self.sessions.append({
+            "name": session_name,
+            "image": canvas.copy(),
+            "output": ai_output
+        })
+    
+    def load_session(self, item):
+        global canvas   # ✅ MUST be first
+
+        index = self.sidebar.row(item)
+
+        # Handle "New Session"
+        if index == 0:
+            canvas[:] = 255
+            self.output.clear()
+            self.status.setText("New Session Started")
+            return
+
+        # Load session (adjust index)
+        session = self.sessions[index - 1]
+
+        canvas = session["image"].copy()
+
+        self.output.setText(session["output"])
+        self.status.setText(f"Loaded {session['name']}")
+
+    def export_notes(self):
+        text = self.output.toPlainText().strip()
+
+        if not text:
+            self.status.setText("Nothing to export")
+            return
+
+        filename = f"notes_{int(time.time())}.pdf"
+
+        doc = SimpleDocTemplate(filename)
+        styles = getSampleStyleSheet()
+
+        content = []
+
+        # Title
+        content.append(Paragraph("AI Generated Notes", styles['Title']))
+        content.append(Spacer(1, 12))
+
+        # 🔥 ADD BOARD IMAGE HERE
+        img_path = "temp_board.png"
+        cv2.imwrite(img_path, canvas)
+
+        content.append(Image(img_path, width=500, height=300))
+        content.append(Spacer(1, 15))
+
+        # Body text
+        for line in text.split("\n"):
+            content.append(Paragraph(line, styles['Normal']))
+            content.append(Spacer(1, 8))
+
+        doc.build(content)
+
+        self.status.setText(f"Exported: {filename}")
+
 
 # ================= RUN =================
 if __name__ == "__main__":
