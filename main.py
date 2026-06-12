@@ -31,7 +31,7 @@ canvas = np.ones((CANVAS_H, CANVAS_W, 3), dtype=np.uint8) * 255
 
 pen_color = (0, 0, 0)
 
-# 🔥 Increased thickness for better OCR detection
+#  Increased thickness for better OCR detection
 pen_thickness = 12
 eraser_thickness = 80
 
@@ -523,13 +523,11 @@ class SmartBoardApp(QWidget):
 
         structured_prompt = "You are an AI smart classroom assistant.\n\n"
 
-        # ✅ Include committed OCR text
         if texts:
             structured_prompt += "The following text was written on the board:\n"
             for t in texts:
                 structured_prompt += f"- {t}\n"
 
-        # ✅ NEW: Include currently typed text even if not committed
         if typed_text.strip():
             structured_prompt += "\nThe user is currently typing:\n"
             structured_prompt += f"- {typed_text.strip()}\n"
