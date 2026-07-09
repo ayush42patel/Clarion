@@ -211,6 +211,6 @@ For major changes, please open an issue first.
 
 ## 👨‍💻 Authors
 
-- **Adarsh Kumar Srivatava**  
 - **Ayush Patel**  
+- **Adarsh Kumar Srivatava**  
 - **Parveen Chaudhary**
